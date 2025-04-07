@@ -11,50 +11,64 @@ class ClientThread(threading.Thread):
         super().__init__()
         self.cid = cid
         self.model = model.to(device)
-        self.train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True)
+        self.train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
         self.test_loader = DataLoader(test_dataset, batch_size=64)
         self.cluster_queue = cluster_queue
         self.receive_model_queue = receive_model_queue
         self.device = device
         self.stop_signal = threading.Event()  # Changed to Event for better control
         self.round_counter = 0
-        self.local_staleness = 0
-        self.last_participated_round = -1
+        self.last_received_round = -1
+        self.observed_global_round = -1
         self.staleness_log = []
         self.participation_count = 0
         self.skipped_rounds = 0
         self.last_activity = time.time()  # For deadlock detection
 
     def run(self):
-        last_model = None  # Cache last model received
+        self.last_model = None
+        self.last_participation_round = 0  # Last round this client participated in
+        self.last_received_round = -1       # Last global round number received
+        self.server_global_round = -1       # Tracks true server round (from received models)
 
         while not self.stop_signal.is_set():
             try:
+                # Check for new model from cluster head
                 try:
                     msg = self.receive_model_queue.get(timeout=30)
                     if msg == "STOP":
                         print(f"[Client {self.cid}] 🛑 Received STOP")
                         break
+                    else:  # Legacy format fallback
+                        global_model, global_round = msg
 
-                    # A new model is received
-                    print('hiiii',msg['round'])
-                    last_model = msg['model']
-                    staleness = self.local_staleness  # ← use accumulated staleness
-                    self.local_staleness = 0          # ← reset after using it
+                    self.last_model = global_model
+                    self.last_received_round = global_round
+                    self.server_global_round = max(self.server_global_round, global_round)
+
+                    print(f"[Client {self.cid}] 📥 Received model for Global Round {global_round}")
 
                 except queue.Empty:
-                    print(f"[Client {self.cid}] ❗ No new model this round — using stale model")
-                    self.local_staleness += 1         # ← stale, so increment
-                    staleness = self.local_staleness
-                    if last_model is None:
-                        print(f"[Client {self.cid}] 🚫 No model ever received — skipping")
+                    print(f"[Client {self.cid}] ❗ Stale Model - using cached model")
+                    if self.last_model is None:
+                        print(f"[Client {self.cid}] 🚫 No model available - skipping")
                         continue
 
-                self.set_parameters(last_model)
+                # Calculate true staleness:
+                # How many global rounds passed since last participation
+                if self.last_participation_round == 0:
+                    staleness = 0
+                else:
+                    staleness = max(0, self.server_global_round - self.last_participation_round -1)
+
+                print(f"[Client {self.cid}] start training 🕒 Staleness: {staleness} "
+                    f"(Server Round: {self.server_global_round}, "
+                    f"Last Participated: {self.last_participation_round})")
+
+                # Train with current model
+                self.set_parameters(self.last_model)
                 self.participation_count += 1
-
-                print(f"[Client {self.cid}] Starting training (Round {self.round_counter + 1}) | 🕒 Staleness: {staleness}")
-
+                self.last_participation_round = self.server_global_round  # Update participation
 
                 # 3. Training
                 train_start = time.time()
@@ -87,7 +101,7 @@ class ClientThread(threading.Thread):
 
                 if self.cluster_queue:
                     self.cluster_queue.put(update, timeout=30)
-                    print(f"[Client {self.cid}] ✅ Sent update | Acc: {test_acc:.2f} | Staleness: {staleness}")
+                    print(f"[Client {self.cid}] ✅ Sent update | Acc: {test_acc:.2f} | Staleness: {staleness} | Train time: {train_time}s")
                 else:
                     print(f"[Client {self.cid}] ❌ ERROR: No cluster queue")
 
@@ -107,8 +121,6 @@ class ClientThread(threading.Thread):
     def set_parameters(self, parameters):
         if self.model is None:
             self.model = CNNMnist().to(self.device)  # Create model only when first update arrives
-        if isinstance(parameters, dict) and 'params' in parameters:
-            parameters = parameters['params']
         for param, new_val in zip(self.model.parameters(), parameters):
             param.data = torch.tensor(new_val, dtype=param.dtype, device=self.device)
 

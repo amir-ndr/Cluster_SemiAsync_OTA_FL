@@ -46,15 +46,15 @@ class ClusterHeadThread(threading.Thread):
                         print(f"[Cluster {self.cluster_id}] ✅ Received update from Client {update['cid']}")
                 except queue.Empty:
                     if time.time() - start_time > self.timeout:
-                        print(f"[Cluster {self.cluster_id}] ⌛ Timeout while waiting for clients")
+                        print(f"[ERROR][Cluster {self.cluster_id}] ⌛ Timeout while waiting for clients")
                         break
 
             if not buffer:
                 print(f"[Cluster {self.cluster_id}] ❌ No client updates received — skipping round {self.round_counter}")
                 self.round_counter += 1
                 continue
-            for update in buffer:
-                print(f"[Cluster {self.cluster_id}] 📉 Client {update['cid']} staleness: {update['staleness']}")
+            # for update in buffer:
+                # print(f"[Cluster {self.cluster_id}] 📉 Client {update['cid']} staleness: {update['staleness']}")
 
             print(f"[Cluster {self.cluster_id}] 📦 Collected {len(buffer)} updates, starting aggregation")
 
@@ -66,27 +66,27 @@ class ClusterHeadThread(threading.Thread):
                 "parameters": aggregated_model,
                 "client_gradients": client_grads
             })
-            print(f"[Cluster {self.cluster_id}] 📤 Sent aggregated model to server (Round {self.round_counter})")
+            # print(f"[Cluster {self.cluster_id}] 📤 Sent aggregated model to server (Round {self.round_counter})")
 
             # Send updated global model back to clients
             try:
                 selected_clients = [update["cid"] for update in buffer]
 
             # Receive global model
-                global_model = self.model_queue.get(timeout=60)
-                if global_model == "STOP":
+                msg = self.model_queue.get(timeout=60)
+                # print('ho',global_model)
+                if msg == "STOP":
                     print(f"[Cluster {self.cluster_id}] 🛑 Received STOP from server")
                     break
-
-                for cid in selected_clients:
-                    self.broadcast_queues[cid].put({'model':global_model['params'], 'round':self.round_counter})
-                    print(f"[Cluster {self.cluster_id}] 📬 Sent global model to Client {cid}")
-                    # global_model = self.model_queue.get(timeout=60)
-
+                global_model, round_ = msg
                 print(f"[Cluster {self.cluster_id}] 📥 Received global model from server")
 
+                for cid in selected_clients:
+                    self.broadcast_queues[cid].put((global_model, round_))
+                    print(f"[Cluster {self.cluster_id}] 📬 Sent global model to Client {cid}")
+
             except queue.Empty:
-                print(f"[Cluster {self.cluster_id}] ❌ Server did not respond with global model")
+                print(f"[ERROR][Cluster {self.cluster_id}] ❌ Server did not respond with global model")
 
             self.round_counter += 1
 

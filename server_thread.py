@@ -25,13 +25,14 @@ class ServerThread(threading.Thread):
         self.num_rounds = num_rounds
         self.recluster_interval = recluster_interval
         self.round_counter = 0
+        self.global_round = 0
         self.stop_signal = False
         self.client_gradients = {}  # client_id -> last gradient
         self.perform_reclustering_callback = None
 
     def run(self):
         while not self.stop_signal and self.round_counter < self.num_rounds:
-            print(f"\n[Server] Waiting for updates from {self.num_clusters} cluster heads (Round {self.round_counter + 1})...")
+            print(f"\n\n[Server] Waiting for updates from {self.num_clusters} cluster heads (Round {self.round_counter + 1})...\n")
             round_updates = []
             received_clusters = set()
 
@@ -64,11 +65,11 @@ class ServerThread(threading.Thread):
             print("[Server] Global model aggregated and broadcasting to clusters")
 
             for cluster_id in range(self.num_clusters):
-                global_model = {
-                    'params': self.aggregate(round_updates),
-                    'round': self.round_counter
-                        }
-                self.global_model_queues[cluster_id].put(global_model)
+                # global_model = {
+                #     'params': self.aggregate(round_updates),
+                #     'round': self.round_counter
+                #         }
+                self.global_model_queues[cluster_id].put((global_model, self.global_round))
 
             if self.should_recluster():
                 print(f"[Server] Re-clustering triggered at round {self.round_counter + 1}")
@@ -81,6 +82,7 @@ class ServerThread(threading.Thread):
                     q.put("STOP")
 
     def aggregate(self, model_list):
+        self.global_round+=1
         aggregated = []
         for params in zip(*model_list):
             stacked = np.stack(params)

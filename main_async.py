@@ -8,8 +8,8 @@ from server_thread import ServerThread
 
 NUM_CLIENTS = 10
 NUM_CLUSTERS = 2
-PHI = 0.5
-NUM_ROUNDS = 15
+PHI = 1
+NUM_ROUNDS = 20
 INTERVAL_RECLUSTER = 5
 
 torch.set_num_threads(1)
@@ -120,14 +120,6 @@ for client in clients:
     cluster_id = initial_assignments[client.cid]
     client.cluster_queue = cluster_queues[cluster_id]
 
-print("\n=== Queue Connection Verification ===")
-for client in clients:
-    print(f"Client {client.cid} -> Cluster {cluster_assignments[client.cid]} -> "
-          f"Cluster Queue: {id(client.cluster_queue)}")
-    
-for cluster_id in range(NUM_CLUSTERS):
-    print(f"Cluster {cluster_id} listening on Queue: {id(cluster_queues[cluster_id])}")
-
 server.start()
 
 # 4. Start all clients
@@ -138,7 +130,7 @@ for c in clients:
 initial_model = model.state_dict()
 initial_params = [param.detach().cpu().numpy() for param in model.parameters()]
 for cid in range(NUM_CLIENTS):
-    client_model_queues[cid].put(initial_params)
+    client_model_queues[cid].put((initial_params, 1))
 
 # 8. Wait for server to complete
 server.join()
