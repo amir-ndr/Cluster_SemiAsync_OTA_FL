@@ -1,4 +1,5 @@
 import threading
+from turtle import up
 import torch
 from model import CNNMnist
 import queue
@@ -34,14 +35,17 @@ class ServerThread(threading.Thread):
         while not self.stop_signal and self.round_counter < self.num_rounds:
             print(f"\n\n[Server] Waiting for updates from {self.num_clusters} cluster heads (Round {self.round_counter + 1})...\n")
             round_updates = []
+            h_list = []
             received_clusters = set()
 
             while len(received_clusters) < self.num_clusters:
                 try:
                     update = self.server_queue.get(timeout=60)
                     cluster_id = update["cluster_id"]
+                    mu_t = update['mu_t']
                     if cluster_id not in received_clusters:
-                        round_updates.append(update["parameters"])
+                        round_updates.append(update["s_nt"])
+                        h_list.append(update['h_nt'])
                         received_clusters.add(cluster_id)
                         # print(f"[Server] Received update from Cluster {cluster_id}")
                         print(f"[Server] Received update from Cluster {cluster_id} (Clients: {list(update['client_gradients'].keys())})")
@@ -59,16 +63,13 @@ class ServerThread(threading.Thread):
 
             print(f"[Server] Queue size: {self.server_queue.qsize()}")
 
-            global_model = self.aggregate(round_updates)
+            # global_model = self.aggregate(round_updates)
+            global_model = self.aggregate_models_ota(round_updates, h_list, mu_t)
             accuracy = self.evaluate_global_model(global_model)
             print(f"[Server] 🧪 Global Model Accuracy after Round {self.round_counter + 1}: {accuracy:.4f}")
             print("[Server] Global model aggregated and broadcasting to clusters")
 
             for cluster_id in range(self.num_clusters):
-                # global_model = {
-                #     'params': self.aggregate(round_updates),
-                #     'round': self.round_counter
-                #         }
                 self.global_model_queues[cluster_id].put((global_model, self.global_round))
 
             if self.should_recluster():
@@ -88,6 +89,40 @@ class ServerThread(threading.Thread):
             stacked = np.stack(params)
             aggregated.append(np.mean(stacked, axis=0))
         return aggregated
+    
+    def aggregate_models_ota(self, s_nt_list, h_n_list, mu_t, noise_std=0.01):
+        self.global_round+=1
+        aggregated_model = []
+        num_clients = len(s_nt_list)
+        num_layers = len(s_nt_list[0])
+
+        for layer_idx in range(num_layers):
+            sum_signal = np.zeros_like(s_nt_list[0][layer_idx], dtype=np.complex128)
+
+            for client_idx in range(num_clients):
+                s = s_nt_list[client_idx][layer_idx]
+                h = h_n_list[client_idx][layer_idx]
+
+                # Debugging
+                if s.shape != h.shape:
+                    print(f"[ERROR] Mismatch in shapes for client {client_idx}, layer {layer_idx}: s {s.shape}, h {h.shape}")
+                    continue
+
+                sum_signal += h * s
+
+            # Add complex Gaussian noise
+            noise = self.generate_awgn_for_layer(sum_signal.shape, std=noise_std)
+            noisy_signal = sum_signal + noise
+
+            # Final OTA output (real part scaled by lambda)
+            aggregated_model.append(np.real(noisy_signal * mu_t))
+
+        return aggregated_model
+
+    def generate_awgn_for_layer(self, shape, std=0.01):
+        real_noise = np.random.normal(loc=0.0, scale=std, size=shape)
+        imag_noise = np.random.normal(loc=0.0, scale=std, size=shape)
+        return real_noise + 1j * imag_noise
 
     def evaluate_global_model(self, global_model_params):
         model = CNNMnist().to(self.device)

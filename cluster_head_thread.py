@@ -26,6 +26,18 @@ class ClusterHeadThread(threading.Thread):
         self.timeout = timeout
         self.stop_signal = False
         self.round_counter = 0
+        self.power_factor = 1.0
+        self.rho_n = 1.0
+
+    def initialize_channel_state(self, model):
+        h_nt = []
+        for layer in model:
+            shape = np.array(layer).shape
+            real_part = np.random.normal(0, 1, size=shape)
+            imag_part = np.random.normal(0, 1, size=shape)
+            complex_channel = real_part + 1j * imag_part
+            h_nt.append(complex_channel)
+        return h_nt
 
     def run(self):
         print(f"[Cluster {self.cluster_id}] 🟢 Thread started with clients: {self.client_ids}")
@@ -53,20 +65,23 @@ class ClusterHeadThread(threading.Thread):
                 print(f"[Cluster {self.cluster_id}] ❌ No client updates received — skipping round {self.round_counter}")
                 self.round_counter += 1
                 continue
-            # for update in buffer:
-                # print(f"[Cluster {self.cluster_id}] 📉 Client {update['cid']} staleness: {update['staleness']}")
 
             print(f"[Cluster {self.cluster_id}] 📦 Collected {len(buffer)} updates, starting aggregation")
-            # print(buffer[0]['s_it'][0].shape, buffer[0]['s_it'][-1].shape)
+            
             aggregated_model = self.aggregate_models_ota([b["s_it"] for b in buffer], [update['h_it'] for update in buffer], update['lambda_t'])
+            self.ch_state = self.initialize_channel_state(aggregated_model)
+            transmit_recover_model = self.transmit_ota(aggregated_model)
             client_grads = {b["cid"]: b["gradient"] for b in buffer}
 
             self.server_queue.put({
                 "cluster_id": self.cluster_id,
-                "parameters": aggregated_model,
-                "client_gradients": client_grads
+                # "parameters": aggregated_model,
+                "s_nt": transmit_recover_model,
+                "h_nt": self.ch_state,
+                "mu_t": self.power_factor,
+                "client_gradients": client_grads,
+                "mu_t": self.power_factor,
             })
-            # print(f"[Cluster {self.cluster_id}] 📤 Sent aggregated model to server (Round {self.round_counter})")
 
             # Send updated global model back to clients
             try:
@@ -124,6 +139,24 @@ class ClusterHeadThread(threading.Thread):
             aggregated_model.append(np.real(noisy_signal * lambda_t))
 
         return aggregated_model
+
+    def generate_channel_inversion_vector(self):
+        c_nt = []
+        for h_layer in self.ch_state:
+            h_layer = np.asarray(h_layer, dtype=np.complex128)
+            magnitude_squared = np.abs(h_layer) ** 2 + 1e-8 
+            c_layer = h_layer / magnitude_squared
+            c_nt.append(c_layer)
+
+        return c_nt
+
+    def transmit_ota(self, aggregated_model):
+        c_nt = self.generate_channel_inversion_vector()
+        s_nt = [
+            (1 / self.power_factor) * self.rho_n * c * x 
+            for c, x in zip(c_nt, aggregated_model)
+        ]
+        return s_nt
 
     def generate_awgn_for_layer(self, shape, std=0.01):
         real_noise = np.random.normal(loc=0.0, scale=std, size=shape)

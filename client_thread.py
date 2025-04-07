@@ -76,6 +76,10 @@ class ClientThread(threading.Thread):
                     staleness = 0
                 else:
                     staleness = max(0, self.server_global_round - self.last_participation_round -1)
+                if staleness > 0:
+                    self.stale_weght = 1/staleness
+                else:
+                    self.stale_weght = 1.0
 
                 print(f"[Client {self.cid}] start training 🕒 Staleness: {staleness} "
                     f"(Server Round: {self.server_global_round}, "
@@ -114,8 +118,8 @@ class ClientThread(threading.Thread):
                     "gradient": gradient,
                     "train_time": train_time,
                     "test_accuracy": test_acc,
-                    "staleness": staleness,
-                    "participation_count": self.participation_count
+                    # "staleness": staleness,
+                    # "participation_count": self.participation_count
                 }
 
                 if self.cluster_queue:
