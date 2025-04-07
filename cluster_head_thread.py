@@ -57,8 +57,8 @@ class ClusterHeadThread(threading.Thread):
                 # print(f"[Cluster {self.cluster_id}] 📉 Client {update['cid']} staleness: {update['staleness']}")
 
             print(f"[Cluster {self.cluster_id}] 📦 Collected {len(buffer)} updates, starting aggregation")
-
-            aggregated_model = self.aggregate_models([b["parameters"] for b in buffer])
+            # print(buffer[0]['s_it'][0].shape, buffer[0]['s_it'][-1].shape)
+            aggregated_model = self.aggregate_models_ota([b["s_it"] for b in buffer], [update['h_it'] for update in buffer], update['lambda_t'])
             client_grads = {b["cid"]: b["gradient"] for b in buffer}
 
             self.server_queue.put({
@@ -96,6 +96,39 @@ class ClusterHeadThread(threading.Thread):
             stacked = np.stack(params)
             aggregated.append(np.mean(stacked, axis=0))
         return aggregated
+    
+    def aggregate_models_ota(self, s_it_list, h_list, lambda_t, noise_std=0.01):
+        aggregated_model = []
+        num_clients = len(s_it_list)
+        num_layers = len(s_it_list[0])
+
+        for layer_idx in range(num_layers):
+            sum_signal = np.zeros_like(s_it_list[0][layer_idx], dtype=np.complex128)
+
+            for client_idx in range(num_clients):
+                s = s_it_list[client_idx][layer_idx]
+                h = h_list[client_idx][layer_idx]
+
+                # Debugging
+                if s.shape != h.shape:
+                    print(f"[ERROR] Mismatch in shapes for client {client_idx}, layer {layer_idx}: s {s.shape}, h {h.shape}")
+                    continue
+
+                sum_signal += h * s
+
+            # Add complex Gaussian noise
+            noise = self.generate_awgn_for_layer(sum_signal.shape, std=noise_std)
+            noisy_signal = sum_signal + noise
+
+            # Final OTA output (real part scaled by lambda)
+            aggregated_model.append(np.real(noisy_signal * lambda_t))
+
+        return aggregated_model
+
+    def generate_awgn_for_layer(self, shape, std=0.01):
+        real_noise = np.random.normal(loc=0.0, scale=std, size=shape)
+        imag_noise = np.random.normal(loc=0.0, scale=std, size=shape)
+        return real_noise + 1j * imag_noise
 
     def stop(self):
         self.stop_signal = True

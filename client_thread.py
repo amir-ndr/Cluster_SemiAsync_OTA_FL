@@ -4,10 +4,12 @@ import queue
 import torch
 import torch.nn.functional as F
 from model import CNNMnist
+import numpy as np
 from torch.utils.data import DataLoader
 
 class ClientThread(threading.Thread):
-    def __init__(self, cid, model, train_dataset, test_dataset, cluster_queue, receive_model_queue, device, batch_size=512):
+    def __init__(self, cid, model, train_dataset, test_dataset, 
+            cluster_queue, receive_model_queue, device, batch_size):
         super().__init__()
         self.cid = cid
         self.model = model.to(device)
@@ -23,7 +25,21 @@ class ClientThread(threading.Thread):
         self.staleness_log = []
         self.participation_count = 0
         self.skipped_rounds = 0
+        self.power_factor = 1.0
+        self.ch_state = self.initialize_channel_state()
+        self.stale_weight = 1.0
         self.last_activity = time.time()  # For deadlock detection
+
+    def initialize_channel_state(self):
+        h_it = []
+        for param in self.model.parameters():
+            shape = param.data.cpu().numpy().shape
+            real_part = np.random.normal(0, 1, size=shape)
+            imag_part = np.random.normal(0, 1, size=shape)
+            complex_channel = real_part + 1j * imag_part
+            h_it.append(complex_channel)
+        return h_it
+
 
     def run(self):
         self.last_model = None
@@ -91,7 +107,10 @@ class ClientThread(threading.Thread):
                 # 4. Send update
                 update = {
                     "cid": self.cid,
-                    "parameters": self.get_parameters(),
+                    # "parameters": self.get_parameters(),
+                    "s_it": self.get_parameters_ota(),
+                    "h_it": self.ch_state,
+                    "lambda_t": self.power_factor,
                     "gradient": gradient,
                     "train_time": train_time,
                     "test_accuracy": test_acc,
@@ -117,6 +136,28 @@ class ClientThread(threading.Thread):
 
     def get_parameters(self):
         return [val.detach().cpu().numpy() for val in self.model.parameters()]
+    
+    def get_parameters_ota(self):
+        x_it = self.get_parameters()
+        b_it = self.generate_channel_inversion_vector()
+        s_it = [
+            (1 / self.power_factor) * self.stale_weight * b * x 
+            for b, x in zip(b_it, x_it)
+        ]
+        return s_it
+
+    def generate_channel_inversion_vector(self):
+        b_it = []
+        for h_layer in self.ch_state:
+            # Ensure complex type
+            h_layer = np.asarray(h_layer, dtype=np.complex128)
+            # Compute b = h / |h|^2 for each entry
+            magnitude_squared = np.abs(h_layer) ** 2 + 1e-8 
+            b_layer = h_layer / magnitude_squared
+
+            b_it.append(b_layer)
+
+        return b_it
 
     def set_parameters(self, parameters):
         if self.model is None:

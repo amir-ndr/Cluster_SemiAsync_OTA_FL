@@ -8,8 +8,8 @@ from server_thread import ServerThread
 
 NUM_CLIENTS = 10
 NUM_CLUSTERS = 2
-PHI = 1
-NUM_ROUNDS = 20
+PHI = 0.5
+NUM_ROUNDS = 10
 INTERVAL_RECLUSTER = 5
 
 torch.set_num_threads(1)
@@ -33,9 +33,12 @@ ch_model_queues = {cid: queue.Queue() for cid in range(NUM_CLUSTERS)}  # send mo
 # 3. Create clients
 clients = []
 
+base_model = CNNMnist()
+initial_weights = base_model.state_dict()
 for i in range(NUM_CLIENTS):
-    train_subset = torch.utils.data.Subset(train_dataset, client_data_map[i])
     model = CNNMnist()
+    model.load_state_dict(initial_weights)
+    train_subset = torch.utils.data.Subset(train_dataset, client_data_map[i])
     client = ClientThread(
         cid=i,
         model=model,
@@ -44,7 +47,7 @@ for i in range(NUM_CLIENTS):
         cluster_queue=None,  # will be set by cluster assignment
         receive_model_queue=client_model_queues[i],
         device=device,
-        batch_size=512
+        batch_size=512,
     )
     clients.append(client)
 
