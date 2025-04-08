@@ -27,7 +27,6 @@ class ClusterHeadThread(threading.Thread):
         self.stop_signal = False
         self.round_counter = 0
         self.power_factor = 1.0
-        self.rho_n = 1.0
 
     def initialize_channel_state(self, model):
         h_nt = []
@@ -54,6 +53,7 @@ class ClusterHeadThread(threading.Thread):
                 try:
                     update = self.cluster_queue.get(timeout=60)
                     if update['cid'] in self.client_ids:
+                        D_i = update['num_samples']
                         buffer.append(update)
                         print(f"[Cluster {self.cluster_id}] ✅ Received update from Client {update['cid']}")
                 except queue.Empty:
@@ -67,8 +67,10 @@ class ClusterHeadThread(threading.Thread):
                 continue
 
             print(f"[Cluster {self.cluster_id}] 📦 Collected {len(buffer)} updates, starting aggregation")
-            
-            aggregated_model = self.aggregate_models_ota([b["s_it"] for b in buffer], [update['h_it'] for update in buffer], update['lambda_t'])
+
+            num_samples = sum(update["num_samples"] for update in buffer)
+            aggregated_model = self.aggregate_models_ota([b["s_it"] for b in buffer],
+                 [update['h_it'] for update in buffer], update['lambda_t'], [update['num_samples']/num_samples for update in buffer])
             self.ch_state = self.initialize_channel_state(aggregated_model)
             transmit_recover_model = self.transmit_ota(aggregated_model)
             client_grads = {b["cid"]: b["gradient"] for b in buffer}
@@ -81,6 +83,7 @@ class ClusterHeadThread(threading.Thread):
                 "mu_t": self.power_factor,
                 "client_gradients": client_grads,
                 "mu_t": self.power_factor,
+                "num_samples": num_samples
             })
 
             # Send updated global model back to clients
@@ -112,7 +115,7 @@ class ClusterHeadThread(threading.Thread):
             aggregated.append(np.mean(stacked, axis=0))
         return aggregated
     
-    def aggregate_models_ota(self, s_it_list, h_list, lambda_t, noise_std=0.01):
+    def aggregate_models_ota(self, s_it_list, h_list, lambda_t, weight, noise_std=0.01):
         aggregated_model = []
         num_clients = len(s_it_list)
         num_layers = len(s_it_list[0])
@@ -121,7 +124,7 @@ class ClusterHeadThread(threading.Thread):
             sum_signal = np.zeros_like(s_it_list[0][layer_idx], dtype=np.complex128)
 
             for client_idx in range(num_clients):
-                s = s_it_list[client_idx][layer_idx]
+                s = s_it_list[client_idx][layer_idx] * weight[client_idx]
                 h = h_list[client_idx][layer_idx]
 
                 # Debugging
@@ -153,7 +156,7 @@ class ClusterHeadThread(threading.Thread):
     def transmit_ota(self, aggregated_model):
         c_nt = self.generate_channel_inversion_vector()
         s_nt = [
-            (1 / self.power_factor) * self.rho_n * c * x 
+            (1 / self.power_factor) * c * x 
             for c, x in zip(c_nt, aggregated_model)
         ]
         return s_nt

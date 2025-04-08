@@ -118,6 +118,7 @@ class ClientThread(threading.Thread):
                     "gradient": gradient,
                     "train_time": train_time,
                     "test_accuracy": test_acc,
+                    "num_samples": len(self.train_loader.dataset)
                     # "staleness": staleness,
                     # "participation_count": self.participation_count
                 }

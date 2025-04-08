@@ -36,16 +36,22 @@ class ServerThread(threading.Thread):
             print(f"\n\n[Server] Waiting for updates from {self.num_clusters} cluster heads (Round {self.round_counter + 1})...\n")
             round_updates = []
             h_list = []
+            p_rho_list = []
             received_clusters = set()
+            self.num_participated_samples = 0
 
             while len(received_clusters) < self.num_clusters:
                 try:
                     update = self.server_queue.get(timeout=60)
                     cluster_id = update["cluster_id"]
                     mu_t = update['mu_t']
+                    num_samples = update['num_samples']
+                    self.num_cluster_samples = update['num_samples']
+                    self.num_participated_samples += num_samples
                     if cluster_id not in received_clusters:
                         round_updates.append(update["s_nt"])
                         h_list.append(update['h_nt'])
+                        p_rho_list.append(self.num_cluster_samples)
                         received_clusters.add(cluster_id)
                         # print(f"[Server] Received update from Cluster {cluster_id}")
                         print(f"[Server] Received update from Cluster {cluster_id} (Clients: {list(update['client_gradients'].keys())})")
@@ -64,10 +70,12 @@ class ServerThread(threading.Thread):
             print(f"[Server] Queue size: {self.server_queue.qsize()}")
 
             # global_model = self.aggregate(round_updates)
-            global_model = self.aggregate_models_ota(round_updates, h_list, mu_t)
+            global_model = self.aggregate_models_ota(round_updates, h_list, mu_t, p_rho_list)
             accuracy = self.evaluate_global_model(global_model)
             print(f"[Server] 🧪 Global Model Accuracy after Round {self.round_counter + 1}: {accuracy:.4f}")
             print("[Server] Global model aggregated and broadcasting to clusters")
+            # print(num_cluster_samples, num_participated_samples)
+            
 
             for cluster_id in range(self.num_clusters):
                 self.global_model_queues[cluster_id].put((global_model, self.global_round))
@@ -90,7 +98,7 @@ class ServerThread(threading.Thread):
             aggregated.append(np.mean(stacked, axis=0))
         return aggregated
     
-    def aggregate_models_ota(self, s_nt_list, h_n_list, mu_t, noise_std=0.01):
+    def aggregate_models_ota(self, s_nt_list, h_n_list, mu_t, rho_list, noise_std=0.01):
         self.global_round+=1
         aggregated_model = []
         num_clients = len(s_nt_list)
@@ -100,21 +108,15 @@ class ServerThread(threading.Thread):
             sum_signal = np.zeros_like(s_nt_list[0][layer_idx], dtype=np.complex128)
 
             for client_idx in range(num_clients):
-                s = s_nt_list[client_idx][layer_idx]
+                s = (s_nt_list[client_idx][layer_idx] * 
+                                    (rho_list[client_idx] / self.num_participated_samples))
                 h = h_n_list[client_idx][layer_idx]
-
-                # Debugging
                 if s.shape != h.shape:
                     print(f"[ERROR] Mismatch in shapes for client {client_idx}, layer {layer_idx}: s {s.shape}, h {h.shape}")
                     continue
-
                 sum_signal += h * s
-
-            # Add complex Gaussian noise
             noise = self.generate_awgn_for_layer(sum_signal.shape, std=noise_std)
             noisy_signal = sum_signal + noise
-
-            # Final OTA output (real part scaled by lambda)
             aggregated_model.append(np.real(noisy_signal * mu_t))
 
         return aggregated_model
