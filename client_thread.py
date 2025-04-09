@@ -1,3 +1,4 @@
+from enum import Flag
 import threading
 import time
 import queue
@@ -45,100 +46,106 @@ class ClientThread(threading.Thread):
         self.server_global_round = -1       # Tracks true server round (from received models)
 
         while not self.stop_signal.is_set():
+            should_train = False
             try:
                 # Check for new model from cluster head
                 try:
-                    msg = self.receive_model_queue.get(timeout=30)
+                    msg = self.receive_model_queue.get(timeout=60)
                     if msg == "STOP":
                         print(f"[Client {self.cid}] 🛑 Received STOP")
                         break
                     elif isinstance(msg, tuple) and msg[0] == "ROUND_UPDATE":
+                        should_train = False
                         _, global_round = msg
                         self.server_global_round = max(self.server_global_round, global_round)
                         print(f"[Client {self.cid}] 🔄 Updated to Server Round {global_round}")
                     else:  # Legacy format fallback
                         global_model, global_round = msg
-
-                    self.last_model = global_model
-                    # self.server_global_round = global_round
-                    self.server_global_round = max(self.server_global_round, global_round)
+                        self.last_model = global_model
+                        self.server_global_round = max(self.server_global_round, global_round)
+                        should_train = True
 
                     print(f"[Client {self.cid}] 📥 Received model for Global Round {global_round}")
 
                 except queue.Empty:
                     print(f"[Client {self.cid}] ❗ Stale Model - using cached model")
+                    self.server_global_round += 1  # Track missed round
+                    staleness = max(0, self.server_global_round - self.last_participation_round)
+
                     if self.last_model is None:
                         print(f"[Client {self.cid}] 🚫 No model available - skipping")
                         continue
+                print(f"[Client {self.cid}]", should_train)
+                if should_train:
 
-                # Calculate true staleness:
-                # How many global rounds passed since last participation
-                # if self.last_participation_round == 0:
-                #     staleness = 0
-                # else:
-                staleness = max(0, self.server_global_round - self.last_participation_round)
-                if staleness > 0:
-                    self.stale_weght = 1/staleness
-                else:
+                    # Calculate true staleness:
+                    # How many global rounds passed since last participation
+                    # if self.last_participation_round == 0:
+                    #     staleness = 0
+                    # else:
+                    staleness = max(0, self.server_global_round - self.last_participation_round)
+                    if staleness > 0:
+                        self.stale_weght = 1/staleness
+                    else:
+                        self.stale_weght = 1.0
                     self.stale_weght = 1.0
-                self.stale_weght = 1.0
 
-                print(f"[Client {self.cid}] start training 🕒 Staleness: {staleness} "
-                    f"(Server Round: {self.server_global_round}, "
-                    f"Last Participated: {self.last_participation_round})")
+                    print(f"[Client {self.cid}] start training 🕒 Staleness: {staleness} "
+                        f"(Server Round: {self.server_global_round}, "
+                        f"Last Participated: {self.last_participation_round})")
 
-                # Train with current model
-                self.set_parameters(self.last_model)
-                self.participation_count += 1
-                # self.last_participation_round = self.server_global_round  # Update participation
+                    # Train with current model
+                    self.set_parameters(self.last_model)
+                    self.participation_count += 1
+                    # self.last_participation_round = self.server_global_round  # Update participation
 
-                # 3. Training
-                train_start = time.time()
-                # optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01, momentum=0.9)
-                optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
+                    # 3. Training
+                    train_start = time.time()
+                    # optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01, momentum=0.9)
+                    optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
 
-                self.model.train()
+                    self.model.train()
 
-                for x, y in self.train_loader:
-                    x, y = x.to(self.device), y.to(self.device)
-                    output = self.model(x)
-                    loss = F.cross_entropy(output, y)
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5.0)
-                    optimizer.step()
+                    for x, y in self.train_loader:
+                        x, y = x.to(self.device), y.to(self.device)
+                        output = self.model(x)
+                        loss = F.cross_entropy(output, y)
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5.0)
+                        optimizer.step()
 
-                train_time = time.time() - train_start
-                gradient = self.get_flattened_gradient()
-                test_loss, test_acc = self.evaluate()
+                    train_time = time.time() - train_start
+                    gradient = self.get_flattened_gradient()
+                    test_loss, test_acc = self.evaluate()
 
-                # 4. Send update
-                update = {
-                    "cid": self.cid,
-                    # "parameters": self.get_parameters(),
-                    "s_it": self.get_parameters_ota(),
-                    "h_it": self.ch_state,
-                    "lambda_t": self.power_factor,
-                    "gradient": gradient,
-                    "train_time": train_time,
-                    "test_accuracy": test_acc,
-                    "num_samples": len(self.train_loader.dataset)
-                    # "staleness": staleness,
-                    # "participation_count": self.participation_count
-                }
+                    # 4. Send update
+                    update = {
+                        "cid": self.cid,
+                        # "parameters": self.get_parameters(),
+                        "s_it": self.get_parameters_ota(),
+                        "h_it": self.ch_state,
+                        "lambda_t": self.power_factor,
+                        "gradient": gradient,
+                        "train_time": train_time,
+                        "test_accuracy": test_acc,
+                        "num_samples": len(self.train_loader.dataset)
+                        # "staleness": staleness,
+                        # "participation_count": self.participation_count
+                    }
 
-                if self.cluster_queue:
-                    try:
-                        self.cluster_queue.put(update, timeout=5)  # Shorter timeout
-                        self.last_participation_round = self.server_global_round
-                    except queue.Full:
-                        print(f"[Client {self.cid}] ❌ Failed to participate this round")
-                        staleness = max(0, self.server_global_round - self.last_participation_round)
+                    if self.cluster_queue:
+                        try:
+                            self.cluster_queue.put(update)  # Shorter timeout
+                            self.last_participation_round = self.server_global_round
+                        except queue.Full:
+                            print(f"[Client {self.cid}] ❌ Failed to participate this round")
+                            # staleness = max(0, self.server_global_round - self.last_participation_round)
+                        print(f"[Client {self.cid}] ✅ Sent update | Loss: {test_loss:.2f} | Acc: {test_acc:.2f} | Staleness: {staleness} | Train time: {train_time}s")
+                    else:
+                        print(f"[Client {self.cid}] ❌ ERROR: No cluster queue")
 
-                    print(f"[Client {self.cid}] ✅ Sent update | Loss: {test_loss:.2f} | Acc: {test_acc:.2f} | Staleness: {staleness} | Train time: {train_time}s")
-                else:
-                    print(f"[Client {self.cid}] ❌ ERROR: No cluster queue")
-
-                self.round_counter += 1
+                    self.round_counter += 1
+                else: continue
 
             except Exception as e:
                 print(f"[Client {self.cid}] ❌ CRITICAL ERROR: {e}")

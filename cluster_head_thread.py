@@ -92,7 +92,7 @@ class ClusterHeadThread(threading.Thread):
             # Send updated global model back to clients
             try:
                 selected_clients = [update["cid"] for update in buffer]
-                assert len(buffer) == min_required, "[WARNING!!!!]Buffer includes non-participants!"
+                assert len(buffer) >= min_required, "[WARNING!!!!]Fewer updates collected than expected!"
 
             # Receive global model
                 msg = self.model_queue.get(timeout=60)
@@ -102,19 +102,19 @@ class ClusterHeadThread(threading.Thread):
                 global_model, round_ = msg
                 print(f"[Cluster {self.cluster_id}] 📥 Received global model from server")
 
-                for cid in self.participating_clients_this_round:
-                    if cid in selected_clients:
-                        self.broadcast_queues[cid].put((global_model, round_))
-                        print(f"[Cluster {self.cluster_id}] 📬 Sent global model to Client {cid}")
-                self.participating_clients_this_round = set()
-
-                # for cid in all_clients_in_cluster:  # Loop through ALL clients
-                #     if cid in self.participating_clients_this_round:
+                # for cid in self.participating_clients_this_round:
+                #     if cid in selected_clients:
                 #         self.broadcast_queues[cid].put((global_model, round_))
                 #         print(f"[Cluster {self.cluster_id}] 📬 Sent global model to Client {cid}")
-                #     else:
-                #         self.broadcast_queues[cid].put(("ROUND_UPDATE", round_))
                 # self.participating_clients_this_round = set()
+
+                for cid in all_clients_in_cluster:  # Loop through ALL clients
+                    if cid in self.participating_clients_this_round:
+                        self.broadcast_queues[cid].put((global_model, round_))
+                        print(f"[Cluster {self.cluster_id}] 📬 Sent global model to Client {cid}")
+                    else:
+                        self.broadcast_queues[cid].put(("ROUND_UPDATE", round_))
+                self.participating_clients_this_round = set()
 
             except queue.Empty:
                 print(f"[ERROR][Cluster {self.cluster_id}] ❌ Server did not respond with global model")

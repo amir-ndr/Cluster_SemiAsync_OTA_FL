@@ -125,7 +125,7 @@ for client in clients:
 
 server.start()
 
-initial_model = model.state_dict()
+initial_model = base_model.state_dict()
 initial_params = [param.detach().cpu().numpy() for param in model.parameters()]
 for cid in range(NUM_CLIENTS):
     client_model_queues[cid].put((initial_params, 1))
