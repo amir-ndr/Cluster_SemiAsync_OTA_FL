@@ -13,15 +13,13 @@ class ClientThread(threading.Thread):
         super().__init__()
         self.cid = cid
         self.model = model.to(device)
-        self.train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+        self.train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
         self.test_loader = DataLoader(test_dataset, batch_size=64)
         self.cluster_queue = cluster_queue
         self.receive_model_queue = receive_model_queue
         self.device = device
         self.stop_signal = threading.Event()  # Changed to Event for better control
         self.round_counter = 0
-        self.last_received_round = -1
-        self.observed_global_round = -1
         self.staleness_log = []
         self.participation_count = 0
         self.skipped_rounds = 0
@@ -44,7 +42,6 @@ class ClientThread(threading.Thread):
     def run(self):
         self.last_model = None
         self.last_participation_round = 0  # Last round this client participated in
-        self.last_received_round = -1       # Last global round number received
         self.server_global_round = -1       # Tracks true server round (from received models)
 
         while not self.stop_signal.is_set():
@@ -55,11 +52,15 @@ class ClientThread(threading.Thread):
                     if msg == "STOP":
                         print(f"[Client {self.cid}] 🛑 Received STOP")
                         break
+                    elif isinstance(msg, tuple) and msg[0] == "ROUND_UPDATE":
+                        _, global_round = msg
+                        self.server_global_round = max(self.server_global_round, global_round)
+                        print(f"[Client {self.cid}] 🔄 Updated to Server Round {global_round}")
                     else:  # Legacy format fallback
                         global_model, global_round = msg
 
                     self.last_model = global_model
-                    self.last_received_round = global_round
+                    # self.server_global_round = global_round
                     self.server_global_round = max(self.server_global_round, global_round)
 
                     print(f"[Client {self.cid}] 📥 Received model for Global Round {global_round}")
@@ -72,14 +73,15 @@ class ClientThread(threading.Thread):
 
                 # Calculate true staleness:
                 # How many global rounds passed since last participation
-                if self.last_participation_round == 0:
-                    staleness = 0
-                else:
-                    staleness = max(0, self.server_global_round - self.last_participation_round -1)
+                # if self.last_participation_round == 0:
+                #     staleness = 0
+                # else:
+                staleness = max(0, self.server_global_round - self.last_participation_round)
                 if staleness > 0:
                     self.stale_weght = 1/staleness
                 else:
                     self.stale_weght = 1.0
+                self.stale_weght = 1.0
 
                 print(f"[Client {self.cid}] start training 🕒 Staleness: {staleness} "
                     f"(Server Round: {self.server_global_round}, "
@@ -88,13 +90,14 @@ class ClientThread(threading.Thread):
                 # Train with current model
                 self.set_parameters(self.last_model)
                 self.participation_count += 1
-                self.last_participation_round = self.server_global_round  # Update participation
+                # self.last_participation_round = self.server_global_round  # Update participation
 
                 # 3. Training
                 train_start = time.time()
-                optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01, momentum=0.9)
+                # optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01, momentum=0.9)
+                optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
+
                 self.model.train()
-                self.model.to(self.device)
 
                 for x, y in self.train_loader:
                     x, y = x.to(self.device), y.to(self.device)
@@ -124,8 +127,14 @@ class ClientThread(threading.Thread):
                 }
 
                 if self.cluster_queue:
-                    self.cluster_queue.put(update, timeout=30)
-                    print(f"[Client {self.cid}] ✅ Sent update | Acc: {test_acc:.2f} | Staleness: {staleness} | Train time: {train_time}s")
+                    try:
+                        self.cluster_queue.put(update, timeout=5)  # Shorter timeout
+                        self.last_participation_round = self.server_global_round
+                    except queue.Full:
+                        print(f"[Client {self.cid}] ❌ Failed to participate this round")
+                        staleness = max(0, self.server_global_round - self.last_participation_round)
+
+                    print(f"[Client {self.cid}] ✅ Sent update | Loss: {test_loss:.2f} | Acc: {test_acc:.2f} | Staleness: {staleness} | Train time: {train_time}s")
                 else:
                     print(f"[Client {self.cid}] ❌ ERROR: No cluster queue")
 

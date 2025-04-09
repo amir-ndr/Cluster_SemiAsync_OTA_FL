@@ -27,6 +27,7 @@ class ClusterHeadThread(threading.Thread):
         self.stop_signal = False
         self.round_counter = 0
         self.power_factor = 1.0
+        self.participating_clients_this_round = set()
 
     def initialize_channel_state(self, model):
         h_nt = []
@@ -40,6 +41,8 @@ class ClusterHeadThread(threading.Thread):
 
     def run(self):
         print(f"[Cluster {self.cluster_id}] 🟢 Thread started with clients: {self.client_ids}")
+        all_clients_in_cluster = self.client_ids
+
 
         while not self.stop_signal:
             buffer = []
@@ -53,9 +56,9 @@ class ClusterHeadThread(threading.Thread):
                 try:
                     update = self.cluster_queue.get(timeout=60)
                     if update['cid'] in self.client_ids:
-                        D_i = update['num_samples']
                         buffer.append(update)
                         print(f"[Cluster {self.cluster_id}] ✅ Received update from Client {update['cid']}")
+                        self.participating_clients_this_round.add(update['cid'])
                 except queue.Empty:
                     if time.time() - start_time > self.timeout:
                         print(f"[ERROR][Cluster {self.cluster_id}] ⌛ Timeout while waiting for clients")
@@ -69,6 +72,7 @@ class ClusterHeadThread(threading.Thread):
             print(f"[Cluster {self.cluster_id}] 📦 Collected {len(buffer)} updates, starting aggregation")
 
             num_samples = sum(update["num_samples"] for update in buffer)
+            # aggregated_model = self.aggregate_models([b["parameters"] for b in buffer])
             aggregated_model = self.aggregate_models_ota([b["s_it"] for b in buffer],
                  [update['h_it'] for update in buffer], update['lambda_t'], [update['num_samples']/num_samples for update in buffer])
             self.ch_state = self.initialize_channel_state(aggregated_model)
@@ -82,26 +86,35 @@ class ClusterHeadThread(threading.Thread):
                 "h_nt": self.ch_state,
                 "mu_t": self.power_factor,
                 "client_gradients": client_grads,
-                "mu_t": self.power_factor,
                 "num_samples": num_samples
             })
 
             # Send updated global model back to clients
             try:
                 selected_clients = [update["cid"] for update in buffer]
+                assert len(buffer) == min_required, "[WARNING!!!!]Buffer includes non-participants!"
 
             # Receive global model
                 msg = self.model_queue.get(timeout=60)
-                # print('ho',global_model)
                 if msg == "STOP":
                     print(f"[Cluster {self.cluster_id}] 🛑 Received STOP from server")
                     break
                 global_model, round_ = msg
                 print(f"[Cluster {self.cluster_id}] 📥 Received global model from server")
 
-                for cid in selected_clients:
-                    self.broadcast_queues[cid].put((global_model, round_))
-                    print(f"[Cluster {self.cluster_id}] 📬 Sent global model to Client {cid}")
+                for cid in self.participating_clients_this_round:
+                    if cid in selected_clients:
+                        self.broadcast_queues[cid].put((global_model, round_))
+                        print(f"[Cluster {self.cluster_id}] 📬 Sent global model to Client {cid}")
+                self.participating_clients_this_round = set()
+
+                # for cid in all_clients_in_cluster:  # Loop through ALL clients
+                #     if cid in self.participating_clients_this_round:
+                #         self.broadcast_queues[cid].put((global_model, round_))
+                #         print(f"[Cluster {self.cluster_id}] 📬 Sent global model to Client {cid}")
+                #     else:
+                #         self.broadcast_queues[cid].put(("ROUND_UPDATE", round_))
+                # self.participating_clients_this_round = set()
 
             except queue.Empty:
                 print(f"[ERROR][Cluster {self.cluster_id}] ❌ Server did not respond with global model")
@@ -115,7 +128,7 @@ class ClusterHeadThread(threading.Thread):
             aggregated.append(np.mean(stacked, axis=0))
         return aggregated
     
-    def aggregate_models_ota(self, s_it_list, h_list, lambda_t, weight, noise_std=0.01):
+    def aggregate_models_ota(self, s_it_list, h_list, lambda_t, weight, noise_std=0.0):
         aggregated_model = []
         num_clients = len(s_it_list)
         num_layers = len(s_it_list[0])

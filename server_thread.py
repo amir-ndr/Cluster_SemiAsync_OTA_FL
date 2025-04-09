@@ -75,31 +75,30 @@ class ServerThread(threading.Thread):
             print(f"[Server] 🧪 Global Model Accuracy after Round {self.round_counter + 1}: {accuracy:.4f}")
             print("[Server] Global model aggregated and broadcasting to clusters")
             # print(num_cluster_samples, num_participated_samples)
-            
+            self.round_counter += 1
 
             for cluster_id in range(self.num_clusters):
-                self.global_model_queues[cluster_id].put((global_model, self.global_round))
+                self.global_model_queues[cluster_id].put((global_model, self.round_counter))
 
             if self.should_recluster():
-                print(f"[Server] Re-clustering triggered at round {self.round_counter + 1}")
+                print(f"[Server] Re-clustering triggered at round {self.round_counter}")
                 self.perform_reclustering()
 
-            self.round_counter += 1
             if self.round_counter >= self.num_rounds:
                 print("[Server] ✅ Finished all training rounds — sending stop signal")
                 for q in self.global_model_queues.values():
                     q.put("STOP")
 
     def aggregate(self, model_list):
-        self.global_round+=1
+        # self.global_round+=1
         aggregated = []
         for params in zip(*model_list):
             stacked = np.stack(params)
             aggregated.append(np.mean(stacked, axis=0))
         return aggregated
     
-    def aggregate_models_ota(self, s_nt_list, h_n_list, mu_t, rho_list, noise_std=0.01):
-        self.global_round+=1
+    def aggregate_models_ota(self, s_nt_list, h_n_list, mu_t, rho_list, noise_std=0.0):
+        # self.global_round+=1
         aggregated_model = []
         num_clients = len(s_nt_list)
         num_layers = len(s_nt_list[0])
@@ -118,6 +117,7 @@ class ServerThread(threading.Thread):
             noise = self.generate_awgn_for_layer(sum_signal.shape, std=noise_std)
             noisy_signal = sum_signal + noise
             aggregated_model.append(np.real(noisy_signal * mu_t))
+            # print(aggregated_model)
 
         return aggregated_model
 
